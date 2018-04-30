@@ -1,0 +1,353 @@
+<html>
+    <head>
+        <meta charset="UTF-8" />
+        <title>Multiplayer Experiment</title>
+        <!-- Load the Phaser game library -->
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/phaser/2.4.2/phaser.min.js"></script>
+        <!-- Load the Socket.io networking library -->
+        <script src="/socket.io/socket.io.js"></script>
+
+        <!-- Some simple styles and fonts -->
+        <style type="text/css">
+            body,html { /* Remove margins */
+                margin: 0px;
+                position: relative;
+                background-color:#9FC7E1; 
+            }
+            canvas { 
+                margin:auto;
+              
+            }
+        </style>
+    </head>
+    <body>
+        <button onclick="reload()">reconnect</button>
+        <script type="text/javascript">
+            var ASSET_URL = "assets/"
+            //We first initialize the phaser game object
+            var WINDOW_WIDTH = 800;
+            var WINDOW_HEIGHT = 600;;
+            var game = new Phaser.Game(WINDOW_WIDTH,WINDOW_HEIGHT, Phaser.AUTO, '', {preload:preload, create:create, update:GameLoop} );
+
+            var water_tiles = [];
+            var bullet_array = [];
+            var rock_tiles = [];
+            var timer;
+            var timerEvent;
+            var socket; //Declare it in this scope, initialize in the `create` function
+            var other_players = {};
+            var layer;
+            var blink;
+            var facing = 'left';
+            var shot=false;
+            var jumpTimer = 0;
+            var player = {
+                sprite:null,//Will hold the sprite when it's created 
+                speed_x:0,// This is the speed it's currently moving at
+                speed_y:0,
+                speed:0.5, // This is the parameter for how fast it should move 
+                friction:0.85,
+                shot:false,
+                blink:false,
+                life:10,
+                port :false,
+                alive:true,
+                bulletRotation:1,
+                update: function(){
+                    // Lerp rotation towards mouse
+                    game.physics.arcade.collide(player.sprite, layer);
+               
+                                       // console.log('shot',this.shot);
+                    // console.log('shoti',player.sprite.shot);
+                    this.bulletRotation =  game.physics.arcade.angleToPointer(this.sprite);
+                    space = game.input.keyboard.addKey(Phaser.Keyboard.SPACEBAR);
+                    shift = game.input.keyboard.addKey(Phaser.Keyboard.SHIFT);
+                    var a = game.input.keyboard.addKey(Phaser.Keyboard.A);
+                    var d = game.input.keyboard.addKey(Phaser.Keyboard.D);
+                    var w = game.input.keyboard.addKey(Phaser.Keyboard.W);
+                    player.sprite.body.velocity.x = 0;
+                    player.sprite.body.velocity.y = 400;
+                    player.sprite.body.fixedRotation = true;
+                    if (a.isDown && this.speed_x>-200)
+                    {
+                        this.speed_x-=11;
+                        facing = 'left';
+                        player.sprite.animations.play('left');
+
+                    }
+                    else if (d.isDown && this.speed_x<200)
+                    {
+                        this.speed_x+=10;
+                        player.sprite.animations.play('right');
+                        facing = 'right';
+    
+                    }
+                    else if (facing === 'right'){
+
+                        player.sprite.animations.play('stop-left');
+                    }
+                    else if (facing === 'left'){
+
+                        player.sprite.animations.play('stop-right');
+                    }
+                    if (w.isDown  && game.time.now > jumpTimer)
+                    {
+                        this.speed_y -= 210;
+                         jumpTimer = game.time.now + 750;
+                    }
+                    if (space.isDown && !this.blink )
+                    {   
+                        this.blink = true;
+                        if(facing === 'right')  
+                        {
+                        player.sprite.animations.play('blink-left');
+                        this.sprite.reset(this.sprite.x+15,this.sprite.y)
+                    }
+    
+                        else{
+                        this.sprite.reset(this.sprite.x-15,this.sprite.y);
+                        player.sprite.animations.play('blink-right');
+                        }
+                         jumpTimer = game.time.now + 750;
+                         this.blink = false;
+                    }
+                    if (!space.isDown ){
+                        this.blink = false;
+                    }
+                    if(shift.isDown ){
+                        
+                        player.sprite.animations.play('port');
+                    }
+                    if(shift.isDown && this.port === false){
+                        this.port = true;
+                    setTimeout(()=>{
+                    this.sprite.reset( game.rnd.integerInRange(0,2500),game.rnd.integerInRange(0,800));
+                    },2000);
+                    setTimeout(()=>{       
+                    this.port = false;
+                    },4000);
+                        // player.sprite.animations.play('port-2');
+                    }
+                    this.sprite.body.velocity.x += this.speed_x*9;
+                    this.sprite.body.velocity.y  += this.speed_y*14;
+
+                    
+                    this.speed_y *= this.friction*0.93;
+                    this.speed_x *= this.friction*0.91;
+                    // Shoot bullet 
+                    if(game.input.activePointer.leftButton.isDown && !this.shot){
+                        var speed_x = Math.cos(  game.physics.arcade.angleToPointer(this.sprite) ) * 20;
+                        var speed_y = Math.sin(  game.physics.arcade.angleToPointer(this.sprite) ) * 20;
+                        this.shot = true;
+                        if(facing == "right"){
+                            player.sprite.animations.play('shoot-left');
+                        }
+                        // Tell the server we shot a bullet 
+                        socket.emit('shoot-bullet',{x:this.sprite.x,y:this.sprite.y,angle:this.bulletRotation,speed_x:speed_x,speed_y:speed_y});
+                    }
+                    if(!game.input.activePointer.leftButton.isDown) this.shot = false;
+
+                    // To make player flash when they are hit, set player.spite.alpha = 0
+                    if(this.sprite.alpha < 1){
+                        this.sprite.alpha += (1 - this.sprite.alpha) * 0.16;
+                        this.sprite.life -=1;
+                    } else {
+                        this.sprite.alpha = 1;
+                    }
+    
+                    // Tell the server we've moved 
+                    if(this.blink){}
+                    socket.emit('move-player',{x:this.sprite.x,y:this.sprite.y})
+  
+                }
+                      
+            };
+
+            function CreateShip(type,x,y,angle){
+                var sprite = game.add.sprite( 800,300,'naruto');
+                sprite.rotation = angle;
+                sprite.anchor.setTo(0.5,1);
+                sprite.life = 20;
+                return sprite;
+            }
+
+
+            function preload(){
+                game.load.crossOrigin = "Anonymous";
+                game.load.image('bullet', ASSET_URL + 'plasma.png');
+                game.load.image('dude1_1', ASSET_URL + 'dude1_1.png');
+                game.load.spritesheet('naruto', 'assets/naruto_1.png',50 ,44, 39);
+                game.load.tilemap('level1', 'assets/star/level1.json', null, Phaser.Tilemap.TILED_JSON);
+                game.load.image('tiles-1', 'assets/star/tiles-1.png');
+                game.load.spritesheet('dude', 'assets/star/dude.png', 32, 48);
+                game.load.spritesheet('droid', 'assets/star/droid.png', 32, 32);
+                game.load.image('starSmall', 'assets/star/star.png');
+                game.load.image('starBig', 'assets/star/star2.png');
+                game.load.image('dirt', 'assets/star/dirt.png');
+                game.load.image('set', 'assets/star/set.png');
+                game.load.image('bg', 'assets/star/bg.png');
+                game.load.image('background', 'assets/star/city.jpg');
+            }
+ 
+            function create(){
+              
+                game.stage.backgroundColor = '#000000';
+                bg = game.add.tileSprite(0, 0, 800, 600, 'background');
+                bg.fixedToCamera = true;
+                map = game.add.tilemap('level1');
+                map.addTilesetImage('tiles-1');
+                map.addTilesetImage('dirt');
+                map.addTilesetImage('set');
+                map.setCollisionByExclusion([ 13, 14, 15, 16, 46, 47, 48, 49, 50, 51 ]);
+                layer = map.createLayer('Tile Layer 1');
+                layer.resizeWorld();
+
+                game.stage.disableVisibilityChange = true;
+                // Create player
+                game.physics.startSystem(Phaser.Physics.ARCADE);
+                player.sprite = game.add.sprite( 800,300,'naruto');
+                player.sprite.frame = 4;
+                player.sprite.animations.add('right',[1,2,3,4,5,6,7],10, true);
+                player.sprite.animations.add('left',[14,15,16,17,18,19,20],10, true);
+                player.sprite.animations.add('stop-right',[21],10, true);
+                player.sprite.animations.add('stop-left',[0],10, true);
+                player.sprite.animations.add('shoot-left',[10],200, false);
+                player.sprite.animations.add('shoot-right',[9],200, false);
+                player.sprite.animations.add('port',[26,27,28,29,30,31,32,27],7,false,true);
+                player.sprite.animations.add('port-2',[27],7,false,true);
+                player.sprite.animations.add('blink-left',[1],7,false,true);
+                player.sprite.animations.add('blink-right',[20],7,false,true);
+                //blink = player.sprite.animations.add('port',[26,27,28,29,30,31,32],10,false);
+                game.physics.enable(player.sprite,  Phaser.Physics.ARCADE);
+                game.camera.follow(player.sprite);
+                player.sprite.body.collideWorldBounds = true;
+                // player.sprite.body.setSize(10, 12, 5, 16);
+                game.physics.arcade.gravity.y =200;
+                player.sprite.body.bounce.y = -0.2;
+
+    
+                player.sprite.anchor.setTo(0.5,0.5);
+               
+                cursors = game.input.keyboard.createCursorKeys();
+
+                socket = io(); // This triggers the 'connection' event on the server
+                socket.emit('new-player',{x:player.sprite.x,y:player.sprite.y,type:1})
+               
+                // Listen for other players connecting
+                socket.on('update-players',function(players_data){
+                    var players_found = {};
+                    // Loop over all the player data received
+                    for(var id in players_data){
+                        
+                        // If the player hasn't been created yet
+                        if(other_players[id] == undefined && id != socket.id){ // Make sure you don't create yourself
+                            var data = players_data[id];
+                            var p = CreateShip(data.type,data.x,data.y,data.angle);
+                            other_players[id] = p;
+                            console.log("Created new player at (" + data.x + ", " + data.y + ")");
+                        }
+                        players_found[id] = true;
+                        
+                        // Update positions of other players 
+                        if(id != socket.id){
+                          other_players[id].target_x  = players_data[id].x; // Update target, not actual position, so we can interpolate
+                          other_players[id].target_y  = players_data[id].y+21;
+                          other_players[id].target_rotation  = players_data[id].angle;
+                        }
+                    }
+                    // Check if a player is missing and delete them 
+                    for(var id in other_players ){
+                        if(!players_found[id] ){
+                            other_players[id].destroy();
+                            delete other_players[id];
+                        }
+                    }   
+                })
+              
+                // Listen for bullet update events 
+                socket.on('bullets-update',function(server_bullet_array){
+        
+                    // If there's not enough bullets on the client, create them
+                    for(var i=0;i<server_bullet_array.length;i++){
+                        if(bullet_array[i] == undefined){
+                            bullet_array[i] = game.add.sprite(server_bullet_array[i].x,server_bullet_array[i].y,'bullet');
+                            console.log('nulett:',server_bullet_array);
+                      } else {
+                          //Otherwise, just update it! 
+                          bullet_array[i].x = server_bullet_array[i].x; 
+                          bullet_array[i].y = server_bullet_array[i].y;
+                      }
+                  }
+                  // Otherwise if there's too many, delete the extra 
+                  for(var i=server_bullet_array.length;i<bullet_array.length;i++){
+                       bullet_array[i].destroy();
+                       bullet_array.splice(i,1);
+                       i--;
+                   }
+                  
+                })
+                // Listen for any player hit events and make that player flash 
+                socket.on('player-hit',function(id){
+                    if(id == socket.id){
+                        console.log('life:',player.alive);
+
+                        //If this is you
+                        player.life -=1;
+                        player.sprite.alpha = 0;
+                        if(player.life === 0){
+                            player.alive = false;
+                            console.log('kill',id);
+                            socket.emit('kill-player',{x:player.sprite.x,y:player.sprite.y,type:1});
+                        //     var died = game.add.sprite(800, 600, 'died');
+
+                        //     game.background = this.game.add.sprite('0','0','died');
+                        game.destroy();
+
+                        }
+                
+                    } else {
+                        // Find the right player 
+                        other_players[id].alpha = 0;
+                    }
+                })
+
+            }
+
+            function GameLoop(){
+                player.update();
+
+                // Each player is responsible for bringing their alpha back up on their own client 
+                // Make sure other players flash back to alpha = 1 when they're hit 
+                for(var id in other_players){
+                    if(other_players[id].alpha < 1){
+                        other_players[id].alpha += (1 - other_players[id].alpha) * 0.16;
+                    } else {
+                        other_players[id].alpha = 1;
+                    }
+                }
+              
+                // Interpolate all players to where they should be 
+                for(var id in other_players){
+                    var p = other_players[id];
+                    if(p.target_x != undefined ){
+                        p.x += (p.target_x - p.x) * 0.16;
+                        p.y += (p.target_y - p.y) * 0.16;
+                        // Intepolate angle while avoiding the positive/negative issue 
+                        var angle = p.target_rotation;
+                        var dir = (angle - p.rotation) / (Math.PI * 2);
+                        dir -= Math.round(dir);
+                        dir = dir * Math.PI * 2;
+                        p.rotation += dir * 0.16;
+                    }
+                }
+
+            }
+          
+            
+        function reload(){
+            location.reload();
+        }
+        </script>
+
+    </body>
+</html>
